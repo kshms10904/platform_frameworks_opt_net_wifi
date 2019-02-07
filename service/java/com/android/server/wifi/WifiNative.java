@@ -332,13 +332,15 @@ public class WifiNative {
     }
 
     /** Helper method invoked to start supplicant if there were no STA ifaces */
+    private boolean supplicantOn = false;
     private boolean startSupplicant() {
         synchronized (mLock) {
-            if (!mIfaceMgr.hasAnyStaIface()) {
+            if (!mIfaceMgr.hasAnyStaIface() || !supplicantOn) {
                 if (!mWificondControl.enableSupplicant()) {
                     Log.e(TAG, "Failed to enable supplicant");
                     return false;
                 }
+                supplicantOn = true;
                 if (!waitForSupplicantConnection()) {
                     Log.e(TAG, "Failed to connect to supplicant");
                     return false;
@@ -363,6 +365,7 @@ public class WifiNative {
                 if (!mWificondControl.disableSupplicant()) {
                     Log.e(TAG, "Failed to disable supplicant");
                 }
+                supplicantOn = false;
             }
         }
     }
@@ -689,8 +692,21 @@ public class WifiNative {
     private String createApIface(@NonNull Iface iface) {
         synchronized (mLock) {
             if (mWifiVendorHal.isVendorHalSupported()) {
-                return mWifiVendorHal.createApIface(
+                String ret = mWifiVendorHal.createApIface(
                         new InterfaceDestoyedListenerInternal(iface.id));
+                //In O and O-MR1, there was only ONE wifi interface for everything (sta and ap)
+                //Most vendors used "wlan0" for those interfaces, but there is no guarantee
+                //This override exists here, because most OEMs return "ap0" when doing createApIface,
+                //even when the iface is actually called "wlan0"
+                //
+                //To be perfectly clean, we should check what value createStaIface (would have) returned
+                //and use the same one.
+                //That's overly complicated, so let's assume this is wlan0 for the moment
+                if(android.os.SystemProperties.getInt("persist.sys.vndk", 28) < 28) {
+                    ret = "wlan0";
+                }
+
+                return ret;
             } else {
                 Log.i(TAG, "Vendor Hal not supported, ignoring createApIface.");
                 return handleIfaceCreationWhenVendorHalNotSupported(iface);
@@ -852,11 +868,6 @@ public class WifiNative {
                 mWifiMetrics.incrementNumSetupClientInterfaceFailureDueToHal();
                 return null;
             }
-            if (!startSupplicant()) {
-                Log.e(TAG, "Failed to start supplicant");
-                mWifiMetrics.incrementNumSetupClientInterfaceFailureDueToSupplicant();
-                return null;
-            }
             Iface iface = mIfaceMgr.allocateIface(Iface.IFACE_TYPE_STA);
             if (iface == null) {
                 Log.e(TAG, "Failed to allocate new STA iface");
@@ -868,6 +879,12 @@ public class WifiNative {
                 Log.e(TAG, "Failed to create STA iface in vendor HAL");
                 mIfaceMgr.removeIface(iface.id);
                 mWifiMetrics.incrementNumSetupClientInterfaceFailureDueToHal();
+                return null;
+            }
+	    Log.e(TAG, "Starting supplicant");
+            if (!startSupplicant()) {
+                Log.e(TAG, "Failed to start supplicant");
+                mWifiMetrics.incrementNumSetupClientInterfaceFailureDueToSupplicant();
                 return null;
             }
             if (mWificondControl.setupInterfaceForClientMode(iface.name) == null) {
